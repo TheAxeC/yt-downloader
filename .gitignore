@@ -4,3 +4,5 @@ package.json
 *.yml
 
 data/
+
+.DS_Store

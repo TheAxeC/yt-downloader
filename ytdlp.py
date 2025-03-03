@@ -1,4 +1,4 @@
-from tqdm.auto import tqdm, trange  # type: ignore
+from tqdm.auto import tqdm, trange 
 import yaml, ssl, os, argparse, re
 from yt_dlp import YoutubeDL, postprocessor
 
@@ -33,23 +33,36 @@ STATS_OPTIONS = {
     'extract_flat': 'in_playlist',
 }
 
-DOWNLOAD_OPTIONS = {
+VIDEO_OPTIONS = {
     'postprocessors': [
         {'actions': [(postprocessor.metadataparser.MetadataParserPP.interpretter,
                                   'description',
                                   '(?s)(?P<meta_comment>.+)')],
                      'key': 'MetadataParser',
                      'when': 'pre_process'},
-        {'already_have_subtitle': False, 'key': 'FFmpegEmbedSubtitle'},
         {'add_chapters': True, 'add_infojson': 'if_exists', 'add_metadata': True, 'key': 'FFmpegMetadata'},
         {'already_have_thumbnail': False, 'key': 'EmbedThumbnail'},
+        {'already_have_subtitle': False, 'key': 'FFmpegEmbedSubtitle'},
         {'key': 'FFmpegConcat', 'only_multi_video': True, 'when': 'playlist'}
     ],
-    'fragment_retries': 10,
     'subtitleslangs': ['en', 'a.en'],
     'writesubtitles': True,
     'writethumbnail': True,
-    'format': FORMAT_VIDEO,
+}
+
+AUDIO_OPTIONS = {
+    'postprocessors': [
+        {'actions': [(postprocessor.metadataparser.MetadataParserPP.interpretter,
+                                  'description',
+                                  '(?s)(?P<meta_comment>.+)')],
+                     'key': 'MetadataParser',
+                     'when': 'pre_process'},
+        {'add_chapters': True, 'add_infojson': 'if_exists', 'add_metadata': True, 'key': 'FFmpegMetadata'},
+    ],
+}
+
+DOWNLOAD_OPTIONS = {
+    'fragment_retries': 10,
     'ratelimit': 5000000,
     'sleep_interval_requests': 2,
     'sleep_interval': 20,    
@@ -67,7 +80,7 @@ class TQDMLogger:
     def warning(self, msg):
         pass
     def error(self, msg):
-        self.pbar.write(f"ERROR: {msg}")
+        self.pbar.write(f"{msg}")
 
 def safe_filename(s: str, max_length: int = 255) -> str:
     """Sanitize a string making it safe to use as a filename."""
@@ -88,7 +101,7 @@ class Stats:
         self._add_key('data_missing', downloaded)
     
     def add_skipped(self, skipped):
-        pass
+        self._add_key('skipped', skipped, discard=True)
 
     def add_failed(self, failed):
         self._add_key('failed', failed, discard=True)
@@ -98,7 +111,7 @@ class Stats:
 
     def calculate_globals(self, pbar):
         self.stats['global'] = {}
-        for key in ['submitted', 'data_missing', 'missing', 'skipped', 'failed']:
+        for key in ['submitted', 'data_missing', 'missing', 'failed']:
             total = sum([elem[key] for elem in self.stats.values() if key in elem])
             if total > 0: self.stats['global'][key] = total
         if 'submitted' in self.stats['global']:
@@ -125,10 +138,15 @@ class Stats:
         if key+"_file" not in self.stats: self.stats[key+"_file"] = []
         self.stats[key+"_file"].append(value)
 
+    def get_skipped(self):
+        if 'skipped' in self.stats: return self.stats['skipped']
+        return 0
+
     def output(self, pbar):
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
         if 'missing' in self.stats: pbar.write(f"    Missing {self.stats['missing']} videos")
+        if 'failed' in self.stats: pbar.write(f"    Failed {self.stats['failed']} videos")
 
 class PlaylistData:
     def __init__(self, name):
@@ -183,6 +201,7 @@ class ItemDownloader:
         self.playlist_data = PlaylistData(self.name)
         self.location = os.path.join(item['location'], item['name']) if 'location' in item else item['name']
         self.outputdir = os.path.join(path, self.location)
+        self.tempdir = os.path.join(path, 'tmp')
         self._set_formatting(item, pbar)
         self.stats = Stats()
     
@@ -193,8 +212,17 @@ class ItemDownloader:
 
     def _set_formatting(self, item, pbar):
         self.opts['logger'] = TQDMLogger(pbar)
-        if 'mp3' in item and item['mp3']: self.opts['format'] = FORMAT_AUDIO
-        outtmpl = self.outputdir
+        if 'mp3' in item and item['mp3']: 
+            self.opts['format'] = FORMAT_AUDIO
+            self.opts.update(AUDIO_OPTIONS)
+        else:
+            self.opts['format'] = FORMAT_VIDEO
+            self.opts.update(VIDEO_OPTIONS)
+        self.opts['paths'] = {
+            'home' : self.outputdir + '/',
+            'temp' : self.tempdir + '/'
+        }
+        outtmpl = self.outputdir + '/'
         if 'add_channel' in item and item['add_channel']: outtmpl = outtmpl + OUTTMPL_CHANNEL
         if 'count' in item and item['count']: outtmpl = outtmpl + OUTTMPL_COUNT
         self.opts['outtmpl'] = outtmpl + OUTTMPL_DEFAULT
@@ -210,32 +238,59 @@ class ItemDownloader:
         if 'other' in self.playlist_data.playlist_data:
             self.pbar.write(f"    Other files: {len(self.playlist_data.playlist_data['other'])}")
 
-    def _download_video(self, ydl, url, title):
+    def _download_video(self):
         """Download the video"""
-        pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
-        def tqdm_hook(d):
-            if d['status'] == 'downloading':
-                if 'total_bytes' not in d: curr_prog = d['fragment_index'] / d['fragment_count']
-                elif d['total_bytes'] is None: curr_prog = 0
-                else: curr_prog = d['downloaded_bytes'] / d['total_bytes']
-                pbar_video.update(curr_prog - pbar_video.n)
-            elif d['status'] == 'error':
-                self.pbar.write(f"    Error downloading: {d['filename']} with error {d['error']}")
-            elif d['status'] == 'finished':
-                self.pbar.update(1)
-        ydl.add_progress_hook(tqdm_hook)
-        result = ydl.download([url])
-        if result == 0:
-            self.playlist_data.add({
-                'url': url,
-                'title': title,
-                'location': self.location,
-                'file': existing_file
-            })
-            self.playlist_data.add(result)
-        else: 
-            self.stats.add_failed(result)
+        download_opts = self.opts.copy()
+        download_opts.update(DOWNLOAD_OPTIONS)
+        download_opts['download_archive'] = self.playlist_data.archive
+        info_dict = {}
+        with YoutubeDL(download_opts) as ydl:
+            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+            self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
+            pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
+            pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
+            pbar_playlist.update(self.stats.get_skipped())
+            pbar_playlist.refresh()
+            def tqdm_hook(d):
+                nonlocal info_dict
+                nonlocal pbar_video
+                nonlocal pbar_playlist
+                if d['status'] == 'downloading':
+                    pbar_video.set_description(f"Downloading {os.path.basename(d['filename'])}")
+                    if 'total_bytes' not in d: curr_prog = d['fragment_index'] / d['fragment_count']
+                    elif d['total_bytes'] is None: curr_prog = 0
+                    else: curr_prog = d['downloaded_bytes'] / d['total_bytes']
+                    pbar_video.update(int(curr_prog*100) - pbar_video.n)
+                elif d['status'] == 'error':
+                    self.pbar.write(f"    Error: {os.path.basename(d['filename'])} with error {d['error']}")
+                    self.stats.add_failed({})
+                    pbar_playlist.update(1)
+                elif d['status'] == 'finished':
+                    pbar_video.set_description(f"Finished {os.path.basename(d['filename'])}")
+                    info_dict = d['info_dict']
+            def tqdm_hook_post(d):
+                nonlocal pbar_video
+                if d['status'] == 'started':
+                    pbar_video.set_description(f"Postprocessing {d['postprocessor']} for {d['info_dict']['title']}")
+                elif d['status'] == 'finished':
+                    pbar_video.set_description(f"Finished {d['postprocessor']} for {d['info_dict']['title']}")
+            def post_hook(filename):
+                pbar_video.set_description(f"Finished {info_dict['title']}")
+                nonlocal pbar_playlist
+                result = {
+                    'url': info_dict['webpage_url'].replace("https://www.", "https://"),
+                    'title': info_dict['title'],
+                    'location': self.location,
+                    'file': filename
+                }
+                pbar_playlist.update(1)
+                self.playlist_data.add(result)
+            ydl.add_progress_hook(tqdm_hook)
+            ydl.add_postprocessor_hook(tqdm_hook_post)
+            ydl.add_post_hook(post_hook)
+            ydl.download([self.url])
         pbar_video.close()
+        pbar_playlist.close()
 
     def _check_stats(self, url, title, item):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
@@ -263,40 +318,42 @@ class ItemDownloader:
             filename = os.path.join(self.outputdir, item)
             if not os.path.exists(filename) and item not in filesnames:
                 self.stats.add_missing(record)
+            else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
     def progress(self, download=False, stat_checker=False):
-        if download: 
-            self.opts.update(DOWNLOAD_OPTIONS)
-            self.opts['download_archive'] = self.playlist_data.archive
         if stat_checker: 
-            self.opts.update(STATS_OPTIONS)
+            stat_opts = self.opts.copy()
+            stat_opts.update(STATS_OPTIONS)
             self._check_special_files()
-        with YoutubeDL(self.opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-            pbar_playlist = trange(100, leave=False, desc="Start", ascii=True)
-            self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos")
-            for entry in info['entries']:
-                if entry['view_count'] is None: continue
-                if stat_checker: self._check_stats(entry['url'], entry['title'], self.item)
-                if download: self._download_video(ydl, entry['url'])
-                pbar_playlist.update(1)
-            pbar_playlist.close()
+            with YoutubeDL(stat_opts) as ydl:
+                info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+                pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
+                self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
+                for entry in info['entries']:
+                    if entry['view_count'] is not None: 
+                        self._check_stats(entry['url'], entry['title'], self.item)
+                    pbar_playlist.update(1)
+                    pbar_playlist.refresh()
+                pbar_playlist.close()
+        if download: self._download_video()
 
-def downloader(data_file, path, download, stats):
+def downloader(data_file, path, download, check_stats):
     """Download the videos from the data file"""
     ssl._create_default_https_context = ssl._create_unverified_context
     with open(data_file, 'r') as file:
         data = yaml.safe_load(file)
         print(f"Downloading {len(data)} channels or playlists")
-    pbar = tqdm(data, desc='Total', ascii=True)
+        print(f"=============================================")
+    pbar = tqdm(data, desc='Total', leave=False, ascii=True)
     stats = Stats()
     for item in pbar:
         item_downloader = ItemDownloader(item, pbar, path)
-        item_downloader.progress(download=download, stat_checker=stats)
+        item_downloader.progress(download=download, stat_checker=check_stats)
         stats.add_category(item['name'], item_downloader.finalize())
-    stats.calculate_globals(pbar)
+    if check_stats: stats.calculate_globals(pbar)
     pbar.close()
+    print(f"=============================================")
 
 if __name__ == '__main__': 
     parser=argparse.ArgumentParser(description="Youtube Downloader", allow_abbrev=False)
@@ -307,8 +364,7 @@ if __name__ == '__main__':
     parser.add_argument("--download", help="Download the files", default=False, action='store_true')
     args=parser.parse_args()
     path = NAS_PATH if args.nas else args.path
-    # downloader(args.data, path, download=args.download, stats=args.stats)
-    downloader(args.data, path, download=False, stats=args.stats)
+    downloader(args.data, path, download=args.download, check_stats=args.stats)
 
     # TODO
     # desc = "Title: "+yt.title+"\nAuthor: "+author+"\nPublished: "+str(yt.publish_date)+"\nTags: "+", ".join(yt.keywords)+"\nAge Restricted: "+str(yt.age_restricted)
