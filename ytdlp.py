@@ -138,6 +138,9 @@ class Stats:
         if key+"_file" not in self.stats: self.stats[key+"_file"] = []
         self.stats[key+"_file"].append(value)
 
+    def has_submitted(self):
+        return 'submitted' in self.stats
+
     def get_skipped(self):
         if 'skipped' in self.stats: return self.stats['skipped']
         return 0
@@ -336,6 +339,7 @@ class ItemDownloader:
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
                 pbar_playlist.close()
+            if not self.stats.has_submitted(): return
         if download: self._download_video()
 
 def downloader(data_file, path, download, check_stats):
