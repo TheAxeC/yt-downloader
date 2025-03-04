@@ -1,6 +1,6 @@
-from tqdm.auto import tqdm, trange 
-import yaml, ssl, os, argparse, re
-from yt_dlp import YoutubeDL, postprocessor
+from tqdm.auto import tqdm, trange # type: ignore
+import yaml, ssl, os, argparse, re # type: ignore
+from yt_dlp import YoutubeDL, postprocessor # type: ignore
 
 DATA_FILE = 'data.yml'
 FORMAT_VIDEO = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
@@ -369,7 +369,3 @@ if __name__ == '__main__':
     args=parser.parse_args()
     path = NAS_PATH if args.nas else args.path
     downloader(args.data, path, download=args.download, check_stats=args.stats)
-
-    # TODO
-    # desc = "Title: "+yt.title+"\nAuthor: "+author+"\nPublished: "+str(yt.publish_date)+"\nTags: "+", ".join(yt.keywords)+"\nAge Restricted: "+str(yt.age_restricted)
-    # desc = desc + "\nSubtitles: " + str(subtitles) + "\nThumbnail: " + str(thumbnail) + "\nChapters: " + str(chapters)+"\nDescription: "+description
