@@ -1,5 +1,5 @@
 from tqdm.auto import tqdm, trange # type: ignore
-import yaml, ssl, os, argparse, re # type: ignore
+import yaml, ssl, os, argparse, re, shutil # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
 
 DATA_FILE = 'data.yml'
@@ -7,13 +7,14 @@ FORMAT_VIDEO = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 FORMAT_AUDIO = 'bestaudio[ext=m4a]/bestaudio'
 
 DATA_PATH = "data"
+
 if os.name == 'posix':
     DEFAULT_PATH, NAS_PATH = "~/Downloads/youtube", "/Volumes/media/youtube"
-    COOKIES = ""
+    TMP_DIR = "~/Downloads/_tmp/"
     import unicodedata
 else:
     DEFAULT_PATH, NAS_PATH = "X:\\youtube", "X:\\youtube"
-    COOKIES = ""
+    TMP_DIR = os.path.join(os.environ['USERPROFILE'], "Downloads\\_tmp")
     
 OUTTMPL_DEFAULT = '%(title)s.%(ext)s'
 OUTTMPL_CHANNEL = '[%(uploader)s] - '
@@ -204,7 +205,7 @@ class ItemDownloader:
         self.playlist_data = PlaylistData(self.name)
         self.location = os.path.join(item['location'], item['name']) if 'location' in item else item['name']
         self.outputdir = os.path.join(path, self.location)
-        self.tempdir = os.path.join(path, 'tmp')
+        self.tempdir = TMP_DIR
         self._set_formatting(item, pbar)
         self.stats = Stats()
     
@@ -225,7 +226,7 @@ class ItemDownloader:
             'home' : self.outputdir + '/',
             'temp' : self.tempdir + '/'
         }
-        outtmpl = self.outputdir + '/'
+        outtmpl = ''
         if 'add_channel' in item and item['add_channel']: outtmpl = outtmpl + OUTTMPL_CHANNEL
         if 'count' in item and item['count']: outtmpl = outtmpl + OUTTMPL_COUNT
         self.opts['outtmpl'] = outtmpl + OUTTMPL_DEFAULT
@@ -273,10 +274,12 @@ class ItemDownloader:
                     info_dict = d['info_dict']
             def tqdm_hook_post(d):
                 nonlocal pbar_video
+                nonlocal info_dict
                 if d['status'] == 'started':
                     pbar_video.set_description(f"Postprocessing {d['postprocessor']} for {d['info_dict']['title']}")
                 elif d['status'] == 'finished':
                     pbar_video.set_description(f"Finished {d['postprocessor']} for {d['info_dict']['title']}")
+                    info_dict = d['info_dict']
             def post_hook(filename):
                 pbar_video.set_description(f"Finished {info_dict['title']}")
                 nonlocal pbar_playlist
@@ -356,11 +359,32 @@ def downloader(data_file, path, download, check_stats):
         item_downloader.progress(download=download, stat_checker=check_stats)
         stats.add_category(item['name'], item_downloader.finalize())
     if check_stats: stats.calculate_globals(pbar)
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
     print(f"=============================================")
 
 if __name__ == '__main__': 
-    parser=argparse.ArgumentParser(description="Youtube Downloader", allow_abbrev=False)
+    usage = """Youtube Downloader
+
+    This script is used to download videos from youtube. It uses the yt-dlp library to download the videos.
+    The script can be used to download videos from channels or playlists. The data file is a yaml file that
+    contains the information about the channels or playlists to download. The script can also be used to
+    check the stats of the videos in the channels or playlists. 
+
+    A PO-token is required to download the videos. 
+        # Replace `~` with `$USERPROFILE` if using Windows
+        cd ~
+        # Replace 0.7.3 with the latest version or the one that matches the plugin
+        git clone --single-branch --branch 0.7.3 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
+        cd bgutil-ytdlp-pot-provider/server/
+        yarn install --frozen-lockfile
+        npx tsc
+        python3 -m pip install -U bgutil-ytdlp-pot-provider"""
+    parser=argparse.ArgumentParser(prog='Builder',
+        description=usage,
+        allow_abbrev=False,
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog='Used for development of youtube download scripts.')
     parser.add_argument("--nas", help="Whether to use the NAS storage", default=False, action='store_true')
     parser.add_argument("--data", help="The data file to use", default=DATA_FILE)
     parser.add_argument("--path", help="The path to download to", default=DEFAULT_PATH)
@@ -369,3 +393,5 @@ if __name__ == '__main__':
     args=parser.parse_args()
     path = NAS_PATH if args.nas else args.path
     downloader(args.data, path, download=args.download, check_stats=args.stats)
+
+    
