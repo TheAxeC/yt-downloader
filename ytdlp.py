@@ -3,6 +3,8 @@ import yaml, ssl, os, argparse, re, shutil # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
 
 DATA_FILE = 'data.yml'
+SPECIAL_FILE = 'special.yml'
+STATS_FILE = 'stats.yml'
 FORMAT_VIDEO = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 FORMAT_AUDIO = 'bestaudio[ext=m4a]/bestaudio'
 
@@ -81,7 +83,7 @@ class TQDMLogger:
     def warning(self, msg):
         pass
     def error(self, msg):
-        self.pbar.write(f"{msg}")
+        self.pbar.write(f"    {msg}")
 
 def safe_filename(s: str, max_length: int = 255) -> str:
     """Sanitize a string making it safe to use as a filename."""
@@ -110,17 +112,18 @@ class Stats:
     def add_submitted(self, submitted):
         self._add_key('submitted', submitted, discard=True)
 
-    def calculate_globals(self, pbar):
+    def calculate_globals(self, pbar, special_file, stats_file, console, file_output):
         self.stats['global'] = {}
         for key in ['submitted', 'data_missing', 'missing', 'failed']:
             total = sum([elem[key] for elem in self.stats.values() if key in elem])
             if total > 0: self.stats['global'][key] = total
-        if 'submitted' in self.stats['global']:
+        if 'submitted' in self.stats['global'] and console:
             pbar.write(f"Submitted {self.stats['global']['submitted']} videos in total")
+        if not file_output: return
         if self.special_files:
-            with open("special.yml", 'w') as file:
+            with open(special_file, 'w') as file:
                 yaml.dump(self.special_files, file)
-        with open("stats.yml", 'w') as file:
+        with open(stats_file, 'w') as file:
             yaml.dump(self.stats, file)
 
     def add_special_files(self, special_files):
@@ -146,7 +149,8 @@ class Stats:
         if 'skipped' in self.stats: return self.stats['skipped']
         return 0
 
-    def output(self, pbar):
+    def output(self, pbar, console):
+        if not console: return
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
         if 'missing' in self.stats: pbar.write(f"    Missing {self.stats['missing']} videos")
@@ -168,11 +172,12 @@ class PlaylistData:
     def archive(self):
         return os.path.join(DATA_PATH, self.name + '.txt')
     
-    def safe(self):
+    def save(self, archive=True):
         playlist_data_file = os.path.join(DATA_PATH, self.name + '.yml')
-        playlist_data_archive = os.path.join(DATA_PATH, self.name + '.txt')
         with open(playlist_data_file, 'w') as file:
             yaml.dump(self.playlist_data, file)
+        if not archive: return
+        playlist_data_archive = os.path.join(DATA_PATH, self.name + '.txt')
         with open(playlist_data_archive, 'w') as file:
             for url in self.playlist_data['downloaded']:
                 file.write("youtube " + url.replace("https://youtube.com/watch?v=", "") + "\n")
@@ -209,9 +214,9 @@ class ItemDownloader:
         self._set_formatting(item, pbar)
         self.stats = Stats()
     
-    def finalize(self):
-        self.stats.output(self.pbar)
-        self.playlist_data.safe()
+    def finalize(self, update=False, console=True, file_output=True):
+        self.stats.output(self.pbar, console=console)
+        if update and file_output: self.playlist_data.save()
         return self.stats
 
     def _set_formatting(self, item, pbar):
@@ -231,7 +236,7 @@ class ItemDownloader:
         if 'count' in item and item['count']: outtmpl = outtmpl + OUTTMPL_COUNT
         self.opts['outtmpl'] = outtmpl + OUTTMPL_DEFAULT
 
-    def _check_special_files(self):
+    def _check_special_files(self, console):
         self.existing_files = []
         if os.path.exists(self.outputdir):
             self.existing_files = [name for name in os.listdir(self.outputdir) if os.path.isfile(os.path.join(self.outputdir, name)) and (name.endswith('.mp4') or name.endswith(".m4a"))]
@@ -239,10 +244,10 @@ class ItemDownloader:
             filesnames = [elem['file'] for elem in self.playlist_data.info.values()]
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
             self.stats.add_special_files([file for file in self.existing_files if file not in filesnames])
-        if 'other' in self.playlist_data.playlist_data:
+        if 'other' in self.playlist_data.playlist_data and console:
             self.pbar.write(f"    Other files: {len(self.playlist_data.playlist_data['other'])}")
 
-    def _download_video(self):
+    def _download_video(self, file_output=True, console=True):
         """Download the video"""
         download_opts = self.opts.copy()
         download_opts.update(DOWNLOAD_OPTIONS)
@@ -250,7 +255,7 @@ class ItemDownloader:
         info_dict = {}
         with YoutubeDL(download_opts) as ydl:
             info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-            self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
+            if console: self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
             pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
             pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
             pbar_playlist.update(self.stats.get_skipped())
@@ -259,6 +264,7 @@ class ItemDownloader:
                 nonlocal info_dict
                 nonlocal pbar_video
                 nonlocal pbar_playlist
+                nonlocal console
                 if d['status'] == 'downloading':
                     pbar_video.set_description(f"Downloading {os.path.basename(d['filename'])}")
                     if 'total_bytes' not in d: curr_prog = d['fragment_index'] / d['fragment_count']
@@ -266,7 +272,7 @@ class ItemDownloader:
                     else: curr_prog = d['downloaded_bytes'] / d['total_bytes']
                     pbar_video.update(int(curr_prog*100) - pbar_video.n)
                 elif d['status'] == 'error':
-                    self.pbar.write(f"    Error: {os.path.basename(d['filename'])} with error {d['error']}")
+                    if console: self.pbar.write(f"    Error: {os.path.basename(d['filename'])} with error {d['error']}")
                     self.stats.add_failed({})
                     pbar_playlist.update(1)
                 elif d['status'] == 'finished':
@@ -283,6 +289,7 @@ class ItemDownloader:
             def post_hook(filename):
                 pbar_video.set_description(f"Finished {info_dict['title']}")
                 nonlocal pbar_playlist
+                nonlocal file_output
                 result = {
                     'url': info_dict['webpage_url'].replace("https://www.", "https://"),
                     'title': info_dict['title'],
@@ -291,6 +298,7 @@ class ItemDownloader:
                 }
                 pbar_playlist.update(1)
                 self.playlist_data.add(result)
+                if file_output: self.playlist_data.save(archive=False)
             ydl.add_progress_hook(tqdm_hook)
             ydl.add_postprocessor_hook(tqdm_hook_post)
             ydl.add_post_hook(post_hook)
@@ -298,7 +306,7 @@ class ItemDownloader:
         pbar_video.close()
         pbar_playlist.close()
 
-    def _check_stats(self, url, title, item):
+    def _check_stats(self, url, title, item, console=True, update=False):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
         existing_file = next((f for f in self.existing_files if safe_filename(title.translate(str.maketrans(safe_chars))) in f), None)
         url = url.replace("https://www.", "https://")
@@ -309,7 +317,9 @@ class ItemDownloader:
         record.pop('channel', None)
         if not existing_file and not in_playlist: self.stats.add_submitted(record)
         if existing_file and not in_playlist:
+            if console: self.pbar.write(f"    \"{title}\" already exists but not in playlist")
             self.stats.add_data_missing(record)
+            if not update: return
             self.playlist_data.add({
                 'url': url,
                 'title': title,
@@ -323,45 +333,50 @@ class ItemDownloader:
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
             filename = os.path.join(self.outputdir, item)
             if not os.path.exists(filename) and item not in filesnames:
+                if console: self.pbar.write(f"    \"{title}\" missing from playlist")
                 self.stats.add_missing(record)
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
-    def progress(self, download=False, stat_checker=False):
+    def progress(self, download=False, stat_checker=False, update=False, console=True):
         if stat_checker: 
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
-            self._check_special_files()
+            self._check_special_files(console=console)
             with YoutubeDL(stat_opts) as ydl:
                 info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
                 pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
-                self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
+                if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
                 for entry in info['entries']:
                     if entry['view_count'] is not None: 
-                        self._check_stats(entry['url'], entry['title'], self.item)
+                        self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
                 pbar_playlist.close()
             if not self.stats.has_submitted(): return
-        if download: self._download_video()
+        if download: self._download_video(file_output=file_output, console=console)
 
-def downloader(data_file, path, download, check_stats):
+def downloader(data_file, path, download, check_stats, update, special_file, stats_file, console, file_output):
     """Download the videos from the data file"""
+    if not download and not check_stats: 
+        if console: print("No action specified")
+        return
     ssl._create_default_https_context = ssl._create_unverified_context
     with open(data_file, 'r') as file:
         data = yaml.safe_load(file)
-        print(f"Downloading {len(data)} channels or playlists")
-        print(f"=============================================")
+        if console: 
+            print(f"Downloading {len(data)} channels or playlists")
+            print(f"=============================================")
     pbar = tqdm(data, desc='Total', leave=False, ascii=True)
     stats = Stats()
     for item in pbar:
         item_downloader = ItemDownloader(item, pbar, path)
-        item_downloader.progress(download=download, stat_checker=check_stats)
-        stats.add_category(item['name'], item_downloader.finalize())
-    if check_stats: stats.calculate_globals(pbar)
+        item_downloader.progress(download=download, stat_checker=check_stats, update=update, console=console)
+        stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output))
+    if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
-    print(f"=============================================")
+    if console: print(f"=============================================")
 
 if __name__ == '__main__': 
     usage = """Youtube Downloader
@@ -370,6 +385,12 @@ if __name__ == '__main__':
     The script can be used to download videos from channels or playlists. The data file is a yaml file that
     contains the information about the channels or playlists to download. The script can also be used to
     check the stats of the videos in the channels or playlists. 
+
+    To download files, you can use:
+        python3 ytdlp.py -sd
+    
+    To check the stats of the files without changing any files, you can use:
+        python3 ytdlp.py -sf
 
     A PO-token is required to download the videos. 
         # Replace `~` with `$USERPROFILE` if using Windows
@@ -385,13 +406,26 @@ if __name__ == '__main__':
         allow_abbrev=False,
         formatter_class=argparse.RawTextHelpFormatter,
         epilog='Used for development of youtube download scripts.')
-    parser.add_argument("--nas", help="Whether to use the NAS storage", default=False, action='store_true')
-    parser.add_argument("--data", help="The data file to use", default=DATA_FILE)
-    parser.add_argument("--path", help="The path to download to", default=DEFAULT_PATH)
-    parser.add_argument("--stats", help="Create a list of files to be downloaded", default=False, action='store_true')
-    parser.add_argument("--download", help="Download the files", default=False, action='store_true')
+    parser.add_argument("-e", "--nas", "--external", help="Whether to use the NAS storage", default=False, action='store_true')
+    parser.add_argument("-s", "--stats", help="Create a list of files to be downloaded", default=False, action='store_true')
+    parser.add_argument("-u", "--update", help="Update the data files (automatically True if downloading, still required if you want to update missing elements)", default=False, action='store_true')
+    parser.add_argument("-d", "--download", help="Download the files", default=False, action='store_true')
+
+    subparsers = parser.add_argument_group(title='File Output',
+        description='Set the files to output to')
+    subparsers.add_argument("-p", "--path", help="The path to download to", default=DEFAULT_PATH)
+    subparsers.add_argument("-i", "--data", "--input", help="The data file to use", default=DATA_FILE)
+    subparsers.add_argument("-m", "--missing", help="The special/missing file to use (for existing files that don't appear in the playlist/channel anymore)", default=SPECIAL_FILE)
+    subparsers.add_argument("-o", "--output", help="The stats file to use", default=STATS_FILE)
+
+    subparsers = parser.add_argument_group(title='Control output',
+        description='Control the output of the script')
+    subparsers.add_argument("-c", "--no-console", help="Dont output to the console", default=False, action='store_true')
+    subparsers.add_argument("-f", "--no-file", help="Dont output to files", default=False, action='store_true')
+    
     args=parser.parse_args()
     path = NAS_PATH if args.nas else args.path
-    downloader(args.data, path, download=args.download, check_stats=args.stats)
-
-    
+    if args.download: args.update = True
+    console = not args.no_console
+    file_output = not args.no_file
+    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output)
