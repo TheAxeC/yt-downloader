@@ -1,6 +1,7 @@
 from tqdm.auto import tqdm, trange # type: ignore
 import yaml, ssl, os, argparse, re, shutil # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
+from yt_dlp.utils import sanitize_filename # type: ignore
 
 DATA_FILE = 'data.yml'
 SPECIAL_FILE = 'special.yml'
@@ -102,6 +103,9 @@ class Stats:
 
     def add_data_missing(self, downloaded):
         self._add_key('data_missing', downloaded)
+
+    def add_ignored(self, ignored):
+        self._add_key('ignored', ignored)
     
     def add_skipped(self, skipped):
         self._add_key('skipped', skipped, discard=True)
@@ -151,6 +155,10 @@ class Stats:
 
     def output(self, pbar, console):
         if not console: return
+        if 'ignored' in self.stats: 
+            pbar.write(f"    Ignored {self.stats['ignored']} videos")
+            for file in self.stats['ignored_file']:
+                pbar.write(f"        \"{file['title']}\" - \"{file['reason']}\"")
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
         if 'missing' in self.stats: pbar.write(f"    Missing {self.stats['missing']} videos")
@@ -172,6 +180,10 @@ class PlaylistData:
     def archive(self):
         return os.path.join(DATA_PATH, self.name + '.txt')
     
+    @property
+    def ignore(self):
+        return self.playlist_data['ignore'] if 'ignore' in self.playlist_data else {}
+    
     def save(self, archive=True):
         playlist_data_file = os.path.join(DATA_PATH, self.name + '.yml')
         with open(playlist_data_file, 'w') as file:
@@ -181,6 +193,9 @@ class PlaylistData:
         with open(playlist_data_archive, 'w') as file:
             for url in self.playlist_data['downloaded']:
                 file.write("youtube " + url.replace("https://youtube.com/watch?v=", "") + "\n")
+            if 'ignore' in self.playlist_data:
+                for url in self.playlist_data['ignore']:
+                    file.write("youtube " + url.replace("https://youtube.com/watch?v=", "") + "\n")
     
     @property
     def info(self):
@@ -236,7 +251,7 @@ class ItemDownloader:
         if 'count' in item and item['count']: outtmpl = outtmpl + OUTTMPL_COUNT
         self.opts['outtmpl'] = outtmpl + OUTTMPL_DEFAULT
 
-    def _check_special_files(self, console):
+    def _check_special_files(self):
         self.existing_files = []
         if os.path.exists(self.outputdir):
             self.existing_files = [name for name in os.listdir(self.outputdir) if os.path.isfile(os.path.join(self.outputdir, name)) and (name.endswith('.mp4') or name.endswith(".m4a"))]
@@ -244,8 +259,8 @@ class ItemDownloader:
             filesnames = [elem['file'] for elem in self.playlist_data.info.values()]
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
             self.stats.add_special_files([file for file in self.existing_files if file not in filesnames])
-        if 'other' in self.playlist_data.playlist_data and console:
-            self.pbar.write(f"    Other files: {len(self.playlist_data.playlist_data['other'])}")
+        for url in self.playlist_data.ignore:
+            self.stats.add_ignored(self.playlist_data.ignore[url])
 
     def _download_video(self, file_output=True, console=True):
         """Download the video"""
@@ -254,7 +269,7 @@ class ItemDownloader:
         download_opts['download_archive'] = self.playlist_data.archive
         info_dict = {}
         with YoutubeDL(download_opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False, process=False))
             if console: self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
             pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
             pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
@@ -309,12 +324,16 @@ class ItemDownloader:
     def _check_stats(self, url, title, item, console=True, update=False):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
         existing_file = next((f for f in self.existing_files if safe_filename(title.translate(str.maketrans(safe_chars))) in f), None)
+        if not existing_file:
+            existing_file = next((f for f in self.existing_files if sanitize_filename(title) in f), None)
         url = url.replace("https://www.", "https://")
         in_playlist = url in self.playlist_data.downloaded
         record = item.copy()
         record['url'] = url
         record['title'] = title
         record.pop('channel', None)
+        if 'ignore' in self.playlist_data.playlist_data and url in self.playlist_data.playlist_data['ignore']:
+            return
         if not existing_file and not in_playlist: self.stats.add_submitted(record)
         if existing_file and not in_playlist:
             if console: self.pbar.write(f"    \"{title}\" already exists but not in playlist")
@@ -342,13 +361,13 @@ class ItemDownloader:
         if stat_checker: 
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
-            self._check_special_files(console=console)
+            self._check_special_files()
             with YoutubeDL(stat_opts) as ydl:
                 info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
                 pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
                 if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
                 for entry in info['entries']:
-                    if entry['view_count'] is not None: 
+                    if 'view_count' in entry and entry['view_count'] is not None: 
                         self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
