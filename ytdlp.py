@@ -153,10 +153,11 @@ class Stats:
         if 'skipped' in self.stats: return self.stats['skipped']
         return 0
 
-    def output(self, pbar, console):
+    def output(self, pbar, console, list_info):
         if not console: return
         if 'ignored' in self.stats: 
             pbar.write(f"    Ignored {self.stats['ignored']} videos")
+        if 'ignored' in self.stats and list_info:
             for file in self.stats['ignored_file']:
                 pbar.write(f"        \"{file['title']}\" - \"{file['reason']}\"")
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
@@ -229,8 +230,8 @@ class ItemDownloader:
         self._set_formatting(item, pbar)
         self.stats = Stats()
     
-    def finalize(self, update=False, console=True, file_output=True):
-        self.stats.output(self.pbar, console=console)
+    def finalize(self, update=False, console=True, file_output=True, list_info=False):
+        self.stats.output(self.pbar, console=console, list_info=list_info)
         if update and file_output: self.playlist_data.save()
         return self.stats
 
@@ -269,7 +270,7 @@ class ItemDownloader:
         download_opts['download_archive'] = self.playlist_data.archive
         info_dict = {}
         with YoutubeDL(download_opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False, process=False))
+            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
             if console: self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
             pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
             pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
@@ -321,7 +322,7 @@ class ItemDownloader:
         pbar_video.close()
         pbar_playlist.close()
 
-    def _check_stats(self, url, title, item, console=True, update=False):
+    def _check_stats(self, url, title, item, console=True, update=False, nas=False):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
         existing_file = next((f for f in self.existing_files if safe_filename(title.translate(str.maketrans(safe_chars))) in f), None)
         if not existing_file:
@@ -346,6 +347,9 @@ class ItemDownloader:
                 'file': existing_file
             })
         if in_playlist and not existing_file:
+            if os.name == 'posix' and not nas: 
+                self.stats.add_skipped(record)
+                return
             item = self.playlist_data.info[url]['file']
             if os.name == 'posix': item = unicodedata.normalize('NFC', item)
             filesnames = [elem['file'] for elem in self.playlist_data.info.values()]
@@ -357,7 +361,7 @@ class ItemDownloader:
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
-    def progress(self, download=False, stat_checker=False, update=False, console=True):
+    def progress(self, download=False, stat_checker=False, update=False, console=True, nas=False):
         if stat_checker: 
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
@@ -368,14 +372,14 @@ class ItemDownloader:
                 if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
                 for entry in info['entries']:
                     if 'view_count' in entry and entry['view_count'] is not None: 
-                        self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update)
+                        self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update, nas=nas)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
                 pbar_playlist.close()
             if not self.stats.has_submitted(): return
         if download: self._download_video(file_output=file_output, console=console)
 
-def downloader(data_file, path, download, check_stats, update, special_file, stats_file, console, file_output):
+def downloader(data_file, path, download, check_stats, update, special_file, stats_file, console, file_output, list_info, nas):
     """Download the videos from the data file"""
     if not download and not check_stats: 
         if console: print("No action specified")
@@ -390,8 +394,8 @@ def downloader(data_file, path, download, check_stats, update, special_file, sta
     stats = Stats()
     for item in pbar:
         item_downloader = ItemDownloader(item, pbar, path)
-        item_downloader.progress(download=download, stat_checker=check_stats, update=update, console=console)
-        stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output))
+        item_downloader.progress(download=download, stat_checker=check_stats, update=update, console=console, nas=nas)
+        stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
     if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
@@ -441,10 +445,11 @@ if __name__ == '__main__':
         description='Control the output of the script')
     subparsers.add_argument("-c", "--no-console", help="Dont output to the console", default=False, action='store_true')
     subparsers.add_argument("-f", "--no-file", help="Dont output to files", default=False, action='store_true')
+    subparsers.add_argument("-l", "--list-info", help="Output the full info of the stats", default=False, action='store_true')
     
     args=parser.parse_args()
     path = NAS_PATH if args.nas else args.path
     if args.download: args.update = True
     console = not args.no_console
     file_output = not args.no_file
-    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output)
+    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
