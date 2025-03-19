@@ -65,8 +65,11 @@ AUDIO_OPTIONS = {
     ],
 }
 
-DOWNLOAD_OPTIONS = {
+DOWNLOAD_OPTIONS_BASE = {
     'fragment_retries': 10,
+}
+
+DOWNLOAD_OPTIONS_WAIT = {
     'ratelimit': 5000000,
     'sleep_interval_requests': 2,
     'sleep_interval': 20,    
@@ -263,10 +266,11 @@ class ItemDownloader:
         for url in self.playlist_data.ignore:
             self.stats.add_ignored(self.playlist_data.ignore[url])
 
-    def _download_video(self, file_output=True, console=True):
+    def _download_video(self, wait=True, file_output=True, console=True):
         """Download the video"""
         download_opts = self.opts.copy()
-        download_opts.update(DOWNLOAD_OPTIONS)
+        download_opts.update(DOWNLOAD_OPTIONS_BASE)
+        if wait: download_opts.update(DOWNLOAD_OPTIONS_WAIT)
         download_opts['download_archive'] = self.playlist_data.archive
         info_dict = {}
         with YoutubeDL(download_opts) as ydl:
@@ -361,7 +365,7 @@ class ItemDownloader:
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
-    def progress(self, download=False, stat_checker=False, update=False, console=True, nas=False):
+    def progress(self, download=False, stat_checker=False, update=False, wait=True, console=True, nas=False):
         if stat_checker: 
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
@@ -377,9 +381,9 @@ class ItemDownloader:
                     pbar_playlist.refresh()
                 pbar_playlist.close()
             if not self.stats.has_submitted(): return
-        if download: self._download_video(file_output=file_output, console=console)
+        if download: self._download_video(wait=wait, file_output=file_output, console=console)
 
-def downloader(data_file, path, download, check_stats, update, special_file, stats_file, console, file_output, list_info, nas):
+def downloader(data_file, path, download, check_stats, update, wait, special_file, stats_file, console, file_output, list_info, nas):
     """Download the videos from the data file"""
     if not download and not check_stats: 
         if console: print("No action specified")
@@ -394,7 +398,7 @@ def downloader(data_file, path, download, check_stats, update, special_file, sta
     stats = Stats()
     for item in pbar:
         item_downloader = ItemDownloader(item, pbar, path)
-        item_downloader.progress(download=download, stat_checker=check_stats, update=update, console=console, nas=nas)
+        item_downloader.progress(download=download, stat_checker=check_stats, update=update, wait=wait, console=console, nas=nas)
         stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
     if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
@@ -433,6 +437,7 @@ if __name__ == '__main__':
     parser.add_argument("-s", "--stats", help="Create a list of files to be downloaded", default=False, action='store_true')
     parser.add_argument("-u", "--update", help="Update the data files (automatically True if downloading, still required if you want to update missing elements)", default=False, action='store_true')
     parser.add_argument("-d", "--download", help="Download the files", default=False, action='store_true')
+    parser.add_argument("-w", "--no-wait", help="Don't wait between requests", default=False, action='store_true')
 
     subparsers = parser.add_argument_group(title='File Output',
         description='Set the files to output to')
@@ -452,4 +457,4 @@ if __name__ == '__main__':
     if args.download: args.update = True
     console = not args.no_console
     file_output = not args.no_file
-    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
+    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, wait=not args.no_wait, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
