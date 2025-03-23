@@ -70,10 +70,10 @@ DOWNLOAD_OPTIONS_BASE = {
 }
 
 DOWNLOAD_OPTIONS_WAIT = {
-    'ratelimit': 5000000,
+    # 'ratelimit': 5000000,
     'sleep_interval_requests': 2,
-    'sleep_interval': 20,    
-    'max_sleep_interval': 120,
+    'sleep_interval': 10, #20,    
+    'max_sleep_interval': 60, #120,
     'sleep_interval_subtitles': 2,
 }
 
@@ -154,6 +154,10 @@ class Stats:
 
     def get_skipped(self):
         if 'skipped' in self.stats: return self.stats['skipped']
+        return 0
+
+    def get_ignored(self):
+        if 'ignored' in self.stats: return self.stats['ignored']
         return 0
 
     def output(self, pbar, console, list_info):
@@ -279,6 +283,7 @@ class ItemDownloader:
             pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
             pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
             pbar_playlist.update(self.stats.get_skipped())
+            pbar_playlist.update(self.stats.get_ignored())
             pbar_playlist.refresh()
             def tqdm_hook(d):
                 nonlocal info_dict
@@ -372,6 +377,9 @@ class ItemDownloader:
             self._check_special_files()
             with YoutubeDL(stat_opts) as ydl:
                 info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+                if info is None: 
+                    if console: self.pbar.write(f"Error: {self.name} not found")
+                    return
                 pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
                 if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
                 for entry in info['entries']:
@@ -396,10 +404,13 @@ def downloader(data_file, path, download, check_stats, update, wait, special_fil
             print(f"=============================================")
     pbar = tqdm(data, desc='Total', leave=False, ascii=True)
     stats = Stats()
-    for item in pbar:
-        item_downloader = ItemDownloader(item, pbar, path)
-        item_downloader.progress(download=download, stat_checker=check_stats, update=update, wait=wait, console=console, nas=nas)
-        stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
+    try:
+        for item in pbar:
+            item_downloader = ItemDownloader(item, pbar, path)
+            item_downloader.progress(download=download, stat_checker=check_stats, update=update, wait=wait, console=console, nas=nas)
+            stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
+    except KeyboardInterrupt as e:
+        pbar.write("Interrupted by user")
     if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
@@ -433,7 +444,7 @@ if __name__ == '__main__':
         allow_abbrev=False,
         formatter_class=argparse.RawTextHelpFormatter,
         epilog='Used for development of youtube download scripts.')
-    parser.add_argument("-e", "--nas", "--external", help="Whether to use the NAS storage", default=False, action='store_true')
+    parser.add_argument("-e", "--nas", "--external", help="Whether to use the NAS storage (only for MacOS)", default=False, action='store_true')
     parser.add_argument("-s", "--stats", help="Create a list of files to be downloaded", default=False, action='store_true')
     parser.add_argument("-u", "--update", help="Update the data files (automatically True if downloading, still required if you want to update missing elements)", default=False, action='store_true')
     parser.add_argument("-d", "--download", help="Download the files", default=False, action='store_true')
@@ -441,10 +452,10 @@ if __name__ == '__main__':
 
     subparsers = parser.add_argument_group(title='File Output',
         description='Set the files to output to')
-    subparsers.add_argument("-p", "--path", help="The path to download to", default=DEFAULT_PATH)
-    subparsers.add_argument("-i", "--data", "--input", help="The data file to use", default=DATA_FILE)
-    subparsers.add_argument("-m", "--missing", help="The special/missing file to use (for existing files that don't appear in the playlist/channel anymore)", default=SPECIAL_FILE)
-    subparsers.add_argument("-o", "--output", help="The stats file to use", default=STATS_FILE)
+    subparsers.add_argument("-p", "--path", help="The path to download to (default: '"+DEFAULT_PATH+"')", default=DEFAULT_PATH)
+    subparsers.add_argument("-i", "--data", "--input", help="The data file to use (default: '"+DATA_FILE+"')", default=DATA_FILE)
+    subparsers.add_argument("-m", "--missing", help="File for videos that have been removed from the playlist/channel (default: '"+SPECIAL_FILE+"')", default=SPECIAL_FILE)
+    subparsers.add_argument("-o", "--output", help="The stats file to use (default: '"+STATS_FILE+"')", default=STATS_FILE)
 
     subparsers = parser.add_argument_group(title='Control output',
         description='Control the output of the script')
