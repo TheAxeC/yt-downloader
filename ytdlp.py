@@ -1,5 +1,6 @@
 from tqdm.auto import tqdm, trange # type: ignore
 import yaml, ssl, os, argparse, re, shutil # type: ignore
+import ntpath # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
 from yt_dlp.utils import sanitize_filename # type: ignore
 
@@ -109,6 +110,9 @@ class Stats:
 
     def add_ignored(self, ignored):
         self._add_key('ignored', ignored)
+    
+    def add_deleted(self, deleted):
+        self._add_key('deleted', deleted)
     
     def add_skipped(self, skipped):
         self._add_key('skipped', skipped, discard=True)
@@ -266,6 +270,7 @@ class ItemDownloader:
             if os.name == 'posix': self.existing_files = [unicodedata.normalize('NFC', name) for name in self.existing_files]
             filesnames = [elem['file'] for elem in self.playlist_data.info.values()]
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
+            filesnames = [ntpath.basename(name) for name in filesnames]
             self.stats.add_special_files([file for file in self.existing_files if file not in filesnames])
         for url in self.playlist_data.ignore:
             self.stats.add_ignored(self.playlist_data.ignore[url])
@@ -319,7 +324,7 @@ class ItemDownloader:
                     'url': info_dict['webpage_url'].replace("https://www.", "https://"),
                     'title': info_dict['title'],
                     'location': self.location,
-                    'file': filename
+                    'file': ntpath.basename(filename),
                 }
                 pbar_playlist.update(1)
                 self.playlist_data.add(result)
@@ -387,6 +392,9 @@ class ItemDownloader:
                         self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update, nas=nas)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
+                urls = [entry['url'].replace("https://www.", "https://") for entry in info['entries'] if 'view_count' in entry and entry['view_count'] is not None]
+                for key in self.playlist_data.info.keys():
+                    if key not in urls: self.stats.add_deleted(os.path.splitext(self.playlist_data.info[key]['file'])[0])
                 pbar_playlist.close()
             if not self.stats.has_submitted(): return
         if download: self._download_video(wait=wait, file_output=file_output, console=console)
@@ -411,6 +419,9 @@ def downloader(data_file, path, download, check_stats, update, wait, special_fil
             stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
     except KeyboardInterrupt as e:
         pbar.write("Interrupted by user")
+    except Exception as e:
+        pbar.write(f"Error: {e}")
+        pbar.write("Exiting")
     if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
