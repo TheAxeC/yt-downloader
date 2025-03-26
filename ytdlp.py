@@ -166,7 +166,17 @@ class Stats:
                 pbar.write(f"        \"{file['title']}\" - \"{file['reason']}\"")
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
+        if 'data_missing' in self.stats and list_info:
+            for file in self.stats['data_missing_file']:
+                pbar.write(f"        \"{file['title']}\"")
         if 'missing' in self.stats: pbar.write(f"    Missing {self.stats['missing']} videos")
+        if 'missing' in self.stats and list_info:
+            for file in self.stats['missing_file']:
+                pbar.write(f"        \"{file['title']}\"")
+        if 'deleted' in self.stats: pbar.write(f"    Deleted {self.stats['deleted']} videos")
+        if 'deleted' in self.stats and list_info:
+            for file in self.stats['deleted_file']:
+                pbar.write(f"        \"{file['title']}\"")
         if 'failed' in self.stats: pbar.write(f"    Failed {self.stats['failed']} videos")
 
 class PlaylistData:
@@ -363,7 +373,6 @@ class ItemDownloader:
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
             filename = os.path.join(self.outputdir, item)
             if not os.path.exists(filename) and item not in filesnames:
-                if console: self.pbar.write(f"    \"{title}\" missing from playlist")
                 self.stats.add_missing(record)
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
