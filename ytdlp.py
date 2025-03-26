@@ -5,7 +5,6 @@ from yt_dlp import YoutubeDL, postprocessor # type: ignore
 from yt_dlp.utils import sanitize_filename # type: ignore
 
 DATA_FILE = 'data.yml'
-SPECIAL_FILE = 'special.yml'
 STATS_FILE = 'stats.yml'
 FORMAT_VIDEO = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
 FORMAT_AUDIO = 'bestaudio[ext=m4a]/bestaudio'
@@ -32,6 +31,7 @@ BASE_OPTIONS = {
     'quiet': True,
     'noprogress': True,
     'abort_on_unavailable_fragments': True,
+    # 'cookiefile': 'cookies.txt',
 }
 
 STATS_OPTIONS = {
@@ -100,7 +100,6 @@ def safe_filename(s: str, max_length: int = 255) -> str:
 class Stats:
     def __init__(self):
         self.stats = {}
-        self.special_files = None
 
     def add_missing(self, missing):
         self._add_key('missing', missing)
@@ -123,7 +122,7 @@ class Stats:
     def add_submitted(self, submitted):
         self._add_key('submitted', submitted, discard=True)
 
-    def calculate_globals(self, pbar, special_file, stats_file, console, file_output):
+    def calculate_globals(self, pbar, stats_file, console, file_output):
         self.stats['global'] = {}
         for key in ['submitted', 'data_missing', 'missing', 'failed']:
             total = sum([elem[key] for elem in self.stats.values() if key in elem])
@@ -131,20 +130,14 @@ class Stats:
         if 'submitted' in self.stats['global'] and console:
             pbar.write(f"Submitted {self.stats['global']['submitted']} videos in total")
         if not file_output: return
-        if self.special_files:
-            with open(special_file, 'w') as file:
-                yaml.dump(self.special_files, file)
         with open(stats_file, 'w') as file:
             yaml.dump(self.stats, file)
 
     def add_special_files(self, special_files):
-        self.special_files = special_files
+        for file in special_files: self._add_key('special', file)
 
     def add_category(self, category, value):
         self.stats[category] = value.stats
-        if value.special_files:
-            if not self.special_files: self.special_files = {}
-            self.special_files[category] = value.special_files
     
     def _add_key(self, key, value, discard=False):
         if key not in self.stats: self.stats[key] = 0
@@ -366,7 +359,7 @@ class ItemDownloader:
                 return
             item = self.playlist_data.info[url]['file']
             if os.name == 'posix': item = unicodedata.normalize('NFC', item)
-            filesnames = [elem['file'] for elem in self.playlist_data.info.values()]
+            filesnames = [elem for elem in self.existing_files]
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
             filename = os.path.join(self.outputdir, item)
             if not os.path.exists(filename) and item not in filesnames:
@@ -390,6 +383,8 @@ class ItemDownloader:
                 for entry in info['entries']:
                     if 'view_count' in entry and entry['view_count'] is not None: 
                         self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update, nas=nas)
+                    else:
+                        self.stats.add_skipped(entry)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
                 urls = [entry['url'].replace("https://www.", "https://") for entry in info['entries'] if 'view_count' in entry and entry['view_count'] is not None]
@@ -399,7 +394,7 @@ class ItemDownloader:
             if not self.stats.has_submitted(): return
         if download: self._download_video(wait=wait, file_output=file_output, console=console)
 
-def downloader(data_file, path, download, check_stats, update, wait, special_file, stats_file, console, file_output, list_info, nas):
+def downloader(data_file, path, download, check_stats, update, wait, stats_file, console, file_output, list_info, nas):
     """Download the videos from the data file"""
     if not download and not check_stats: 
         if console: print("No action specified")
@@ -422,7 +417,7 @@ def downloader(data_file, path, download, check_stats, update, wait, special_fil
     except Exception as e:
         pbar.write(f"Error: {e}")
         pbar.write("Exiting")
-    if check_stats: stats.calculate_globals(pbar, special_file, stats_file, console, file_output)
+    if check_stats: stats.calculate_globals(pbar, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
     pbar.close()
     if console: print(f"=============================================")
@@ -465,7 +460,6 @@ if __name__ == '__main__':
         description='Set the files to output to')
     subparsers.add_argument("-p", "--path", help="The path to download to (default: '"+DEFAULT_PATH+"')", default=DEFAULT_PATH)
     subparsers.add_argument("-i", "--data", "--input", help="The data file to use (default: '"+DATA_FILE+"')", default=DATA_FILE)
-    subparsers.add_argument("-m", "--missing", help="File for videos that have been removed from the playlist/channel (default: '"+SPECIAL_FILE+"')", default=SPECIAL_FILE)
     subparsers.add_argument("-o", "--output", help="The stats file to use (default: '"+STATS_FILE+"')", default=STATS_FILE)
 
     subparsers = parser.add_argument_group(title='Control output',
@@ -479,4 +473,4 @@ if __name__ == '__main__':
     if args.download: args.update = True
     console = not args.no_console
     file_output = not args.no_file
-    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, wait=not args.no_wait, special_file=args.missing, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
+    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, wait=not args.no_wait, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
