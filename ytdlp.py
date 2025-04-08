@@ -120,7 +120,7 @@ class Stats:
         self._add_key('failed', failed, discard=True)
     
     def add_submitted(self, submitted):
-        self._add_key('submitted', submitted, discard=True)
+        self._add_key('submitted', submitted, discard=False)
 
     def calculate_globals(self, pbar, stats_file, console, file_output):
         self.stats['global'] = {}
@@ -339,7 +339,7 @@ class ItemDownloader:
         pbar_video.close()
         pbar_playlist.close()
 
-    def _check_stats(self, url, title, item, console=True, update=False, nas=False):
+    def _check_stats(self, url, title, channel, item, console=True, update=False, nas=False):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
         existing_file = next((f for f in self.existing_files if safe_filename(title.translate(str.maketrans(safe_chars))) in f), None)
         if not existing_file:
@@ -350,6 +350,7 @@ class ItemDownloader:
         record['url'] = url
         record['title'] = title
         record.pop('channel', None)
+        record['channel'] = channel
         if 'ignore' in self.playlist_data.playlist_data and url in self.playlist_data.playlist_data['ignore']:
             return
         if not existing_file and not in_playlist: self.stats.add_submitted(record)
@@ -390,8 +391,8 @@ class ItemDownloader:
                 pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
                 if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
                 for entry in info['entries']:
-                    if 'view_count' in entry and entry['view_count'] is not None: 
-                        self._check_stats(entry['url'], entry['title'], self.item, console=console, update=update, nas=nas)
+                    if 'view_count' in entry and entry['view_count'] is not None:
+                        self._check_stats(entry['url'], entry['title'], entry['channel'], self.item, console=console, update=update, nas=nas)
                     else:
                         self.stats.add_skipped(entry)
                     pbar_playlist.update(1)
