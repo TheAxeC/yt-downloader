@@ -71,10 +71,10 @@ DOWNLOAD_OPTIONS_BASE = {
 }
 
 DOWNLOAD_OPTIONS_WAIT = {
-    # 'ratelimit': 5000000,
+    'ratelimit': 4000000,
     'sleep_interval_requests': 2,
-    'sleep_interval': 10, #20,    
-    'max_sleep_interval': 60, #120,
+    'sleep_interval': 20,    
+    'max_sleep_interval': 120,
     'sleep_interval_subtitles': 2,
 }
 
@@ -425,7 +425,9 @@ def downloader(data_file, path, download, check_stats, update, wait, stats_file,
     except KeyboardInterrupt as e:
         pbar.write("Interrupted by user")
     except Exception as e:
+        import traceback
         pbar.write(f"Error: {e}")
+        traceback.print_exc()
         pbar.write("Exiting")
     if check_stats: stats.calculate_globals(pbar, stats_file, console, file_output)
     shutil.rmtree(TMP_DIR, ignore_errors=True)
