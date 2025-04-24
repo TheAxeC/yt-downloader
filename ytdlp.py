@@ -122,13 +122,18 @@ class Stats:
     def add_submitted(self, submitted):
         self._add_key('submitted', submitted, discard=False)
 
+    def add_downloaded(self, downloaded):
+        self._add_key('downloaded', downloaded, discard=True)
+
     def calculate_globals(self, pbar, stats_file, console, file_output):
         self.stats['global'] = {}
-        for key in ['submitted', 'data_missing', 'missing', 'failed']:
+        for key in ['submitted', 'data_missing', 'missing', 'failed', 'downloaded']:
             total = sum([elem[key] for elem in self.stats.values() if key in elem])
             if total > 0: self.stats['global'][key] = total
         if 'submitted' in self.stats['global'] and console:
             pbar.write(f"Submitted {self.stats['global']['submitted']} videos in total")
+        if 'downloaded' in self.stats['global'] and console:
+            pbar.write(f"Downloaded {self.stats['global']['downloaded']} videos in total")
         if not file_output: return
         with open(stats_file, 'w') as file:
             yaml.dump(self.stats, file)
@@ -165,6 +170,7 @@ class Stats:
             for file in self.stats['ignored_file']:
                 pbar.write(f"        \"{file['title']}\" - \"{file['reason']}\"")
         if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
+        if 'downloaded' in self.stats: pbar.write(f"    Downloaded {self.stats['downloaded']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
         if 'data_missing' in self.stats and list_info:
             for file in self.stats['data_missing_file']:
@@ -329,6 +335,7 @@ class ItemDownloader:
                     'location': self.location,
                     'file': ntpath.basename(filename),
                 }
+                self.stats.add_downloaded(result)
                 pbar_playlist.update(1)
                 self.playlist_data.add(result)
                 if file_output: self.playlist_data.save(archive=False)
