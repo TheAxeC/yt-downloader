@@ -78,6 +78,10 @@ DOWNLOAD_OPTIONS_WAIT = {
     'sleep_interval_subtitles': 2,
 }
 
+class DownloadErrorException(Exception):
+    """Base class for other exceptions"""
+    pass
+
 class TQDMLogger:
     def __init__(self, pbar):
         self.pbar = pbar
@@ -88,7 +92,14 @@ class TQDMLogger:
     def warning(self, msg):
         pass
     def error(self, msg):
+        if 'Private video' in msg: return
+        if 'Video unavailable' in msg: return
+        if 'members' in msg: return
+        if 'Sign in to confirm your age' in msg: return
+        # if "Sign in to confirm you’re not a bot" not in msg:
+        #     return
         self.pbar.write(f"    {msg}")
+        # raise DownloadErrorException()
 
 def safe_filename(s: str, max_length: int = 255) -> str:
     """Sanitize a string making it safe to use as a filename."""
@@ -431,6 +442,8 @@ def downloader(data_file, path, download, check_stats, update, wait, stats_file,
             stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
     except KeyboardInterrupt as e:
         pbar.write("Interrupted by user")
+    except DownloadErrorException as e:
+        pbar.write(f"Encountered error while downloading.")
     except Exception as e:
         import traceback
         pbar.write(f"Error: {e}")
