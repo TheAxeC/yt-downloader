@@ -31,7 +31,8 @@ BASE_OPTIONS = {
     'quiet': True,
     'noprogress': True,
     'abort_on_unavailable_fragments': True,
-    # 'cookiefile': 'cookies.txt',
+    'cookiefile': 'cookies.txt',  # Use cookies from browser
+    'extractor_args': {'youtube': {'player_client': ['ios', 'web']}},  # Use multiple clients
 }
 
 STATS_OPTIONS = {
@@ -72,8 +73,8 @@ DOWNLOAD_OPTIONS_BASE = {
 
 DOWNLOAD_OPTIONS_WAIT = {
     'ratelimit': 4000000,
-    'sleep_interval_requests': 2,
-    'sleep_interval': 20,    
+    'sleep_interval_requests': 5,
+    'sleep_interval': 30,    
     'max_sleep_interval': 120,
     'sleep_interval_subtitles': 2,
 }
@@ -85,11 +86,11 @@ class DownloadErrorException(Exception):
 class TQDMLogger:
     def __init__(self, pbar):
         self.pbar = pbar
-    def debug(self, msg):
+    def debug(self, _):
         pass
-    def info(self, msg):
+    def info(self, _):
         pass
-    def warning(self, msg):
+    def warning(self, _):
         pass
     def error(self, msg):
         if 'Private video' in msg: return
