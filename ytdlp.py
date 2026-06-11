@@ -397,7 +397,7 @@ class ItemDownloader:
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
-    def progress(self, download=False, stat_checker=False, update=False, wait=True, console=True, nas=False):
+    def progress(self, download=False, stat_checker=False, update=False, wait=True, console=True, nas=False, file_output=True):
         if stat_checker: 
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
@@ -439,7 +439,7 @@ def downloader(data_file, path, download, check_stats, update, wait, stats_file,
     try:
         for item in pbar:
             item_downloader = ItemDownloader(item, pbar, path)
-            item_downloader.progress(download=download, stat_checker=check_stats, update=update, wait=wait, console=console, nas=nas)
+            item_downloader.progress(download=download, stat_checker=check_stats, update=update, wait=wait, console=console, nas=nas, file_output=file_output)
             stats.add_category(item['name'], item_downloader.finalize(update=True if download else update, console=console, file_output=file_output, list_info=list_info))
     except KeyboardInterrupt as e:
         pbar.write("Interrupted by user")

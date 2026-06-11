@@ -5,4 +5,7 @@ package.json
 
 data/
 
+# Auth cookies / PO-token credentials — never commit
+cookies.txt
+
 .DS_Store
