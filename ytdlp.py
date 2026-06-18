@@ -1,5 +1,5 @@
 from tqdm.auto import tqdm, trange # type: ignore
-import yaml, ssl, os, argparse, re, shutil # type: ignore
+import yaml, ssl, os, argparse, re, shutil, time # type: ignore
 import ntpath # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
 from yt_dlp.utils import sanitize_filename # type: ignore
@@ -38,6 +38,22 @@ BASE_OPTIONS = {
 STATS_OPTIONS = {
     'extract_flat': 'in_playlist',
 }
+
+STATS_FETCH_RETRIES = 3      # attempts to get a full playlist when YouTube truncates the page
+STATS_FETCH_RETRY_WAIT = 5   # seconds to wait between retries
+
+# Rough storage estimate for to-be-downloaded videos, from each video's duration (already
+# in the flat listing, so no extra requests). Assumed bitrates for the formats we grab.
+EST_VIDEO_MBPS = 3.5         # bestvideo[ext=mp4]+bestaudio[ext=m4a] ~ 1080p H.264
+EST_AUDIO_MBPS = 0.128       # bestaudio[ext=m4a]
+
+def estimate_gb(records):
+    """Estimated download size (GB) for a list of submitted records, via duration x bitrate."""
+    gb = 0.0
+    for r in records:
+        mbps = EST_AUDIO_MBPS if r.get('mp3') else EST_VIDEO_MBPS
+        gb += (r.get('duration') or 0) / 3600 * mbps * 0.45  # 1 Mbps ~= 0.45 GB/hour
+    return gb
 
 VIDEO_OPTIONS = {
     'postprocessors': [
@@ -134,18 +150,42 @@ class Stats:
     def add_submitted(self, submitted):
         self._add_key('submitted', submitted, discard=False)
 
+    def add_pending(self, pending):
+        self._add_key('pending', pending, discard=False)
+
+    def has_pending(self):
+        return 'pending' in self.stats
+
     def add_downloaded(self, downloaded):
         self._add_key('downloaded', downloaded, discard=True)
 
+    GLOBAL_LABELS = {
+        'submitted': 'Submitted',
+        'pending': 'Pending triage',
+        'downloaded': 'Downloaded',
+        'data_missing': 'Data missing',
+        'missing': 'Missing',
+        'deleted': 'Deleted',
+        'ignored': 'Ignored',
+        'failed': 'Failed',
+    }
+
     def calculate_globals(self, pbar, stats_file, console, file_output):
+        categories = [elem for key, elem in self.stats.items() if key != 'global' and isinstance(elem, dict)]
         self.stats['global'] = {}
-        for key in ['submitted', 'data_missing', 'missing', 'failed', 'downloaded']:
-            total = sum([elem[key] for elem in self.stats.values() if key in elem])
-            if total > 0: self.stats['global'][key] = total
-        if 'submitted' in self.stats['global'] and console:
-            pbar.write(f"Submitted {self.stats['global']['submitted']} videos in total")
-        if 'downloaded' in self.stats['global'] and console:
-            pbar.write(f"Downloaded {self.stats['global']['downloaded']} videos in total")
+        for key, label in self.GLOBAL_LABELS.items():
+            total = sum(elem[key] for elem in categories if key in elem)
+            if total <= 0: continue
+            self.stats['global'][key] = total
+            if console: pbar.write(f"{label} {total} videos in total")
+        gb = sum(estimate_gb(elem.get('submitted_file', [])) for elem in categories)
+        if gb > 0:
+            self.stats['global']['estimated_gb'] = round(gb, 1)
+            if console: pbar.write(f"Estimated download size: ~{gb:.0f} GB ({gb/1000:.2f} TB)")
+        gb_pending = sum(estimate_gb(elem.get('pending_file', [])) for elem in categories)
+        if gb_pending > 0:
+            self.stats['global']['pending_gb'] = round(gb_pending, 1)
+            if console: pbar.write(f"Pending triage: ~{gb_pending:.0f} GB awaiting review (run --triage or --review)")
         if not file_output: return
         with open(stats_file, 'w') as file:
             yaml.dump(self.stats, file)
@@ -181,7 +221,10 @@ class Stats:
         if 'ignored' in self.stats and list_info:
             for file in self.stats['ignored_file']:
                 pbar.write(f"        \"{file['title']}\" - \"{file['reason']}\"")
-        if 'submitted' in self.stats: pbar.write(f"    Submitted {self.stats['submitted']} videos")
+        if 'submitted' in self.stats:
+            pbar.write(f"    Submitted {self.stats['submitted']} videos (~{estimate_gb(self.stats.get('submitted_file', [])):.0f} GB)")
+        if 'pending' in self.stats:
+            pbar.write(f"    Pending triage {self.stats['pending']} videos (~{estimate_gb(self.stats.get('pending_file', [])):.0f} GB)")
         if 'downloaded' in self.stats: pbar.write(f"    Downloaded {self.stats['downloaded']} videos")
         if 'data_missing' in self.stats: pbar.write(f"    Data missing {self.stats['data_missing']} videos")
         if 'data_missing' in self.stats and list_info:
@@ -247,6 +290,36 @@ class PlaylistData:
             'file': result['file']
         }
 
+    # --- watch / triage support ---
+    # pending: new videos in a watched playlist awaiting a decision {url: record}
+    # approved: videos triaged 'download', queued for the next download run [url, ...]
+    @property
+    def pending(self):
+        return self.playlist_data.get('pending', {})
+
+    @property
+    def approved(self):
+        return self.playlist_data.get('approved', [])
+
+    def add_pending(self, url, record):
+        self.playlist_data.setdefault('pending', {})[url] = record
+
+    def approve(self, url):
+        """Triage decision 'download': move pending -> approved (download next run)."""
+        self.playlist_data.get('pending', {}).pop(url, None)
+        if url not in self.playlist_data.setdefault('approved', []):
+            self.playlist_data['approved'].append(url)
+
+    def ignore_video(self, url, reason='manual triage'):
+        """Triage decision 'ignore': move pending -> ignore (never offered again)."""
+        record = self.playlist_data.get('pending', {}).pop(url, None)
+        self.playlist_data.setdefault('ignore', {})[url] = {'title': (record or {}).get('title', ''), 'reason': reason}
+
+    def prune_downloaded_approved(self):
+        """Drop approved entries that are now downloaded (called after a download run)."""
+        if 'approved' in self.playlist_data:
+            self.playlist_data['approved'] = [u for u in self.playlist_data['approved'] if u not in self.playlist_data['downloaded']]
+
 class ItemDownloader:
     def __init__(self, item, pbar, path):
         self.opts = BASE_OPTIONS.copy()
@@ -254,6 +327,7 @@ class ItemDownloader:
         if 'channel' in item and item['channel']: item['url'] = item['url'] + '/videos'
         self.url = item['url']
         self.item = item
+        self.watch = bool(item.get('watch'))  # watched playlists collect new videos for triage instead of auto-downloading
         self.pbar = pbar
         self.playlist_data = PlaylistData(self.name)
         self.location = os.path.join(item['location'], item['name']) if 'location' in item else item['name']
@@ -264,7 +338,8 @@ class ItemDownloader:
     
     def finalize(self, update=False, console=True, file_output=True, list_info=False):
         self.stats.output(self.pbar, console=console, list_info=list_info)
-        if update and file_output: self.playlist_data.save()
+        # Watch playlists must persist their pending/approved changes even on a plain -s run.
+        if file_output and (update or self.watch): self.playlist_data.save()
         return self.stats
 
     def _set_formatting(self, item, pbar):
@@ -302,14 +377,23 @@ class ItemDownloader:
         download_opts.update(DOWNLOAD_OPTIONS_BASE)
         if wait: download_opts.update(DOWNLOAD_OPTIONS_WAIT)
         download_opts['download_archive'] = self.playlist_data.archive
+        # Watch playlists download the curated list of approved video URLs; track playlists
+        # hand yt-dlp the whole playlist URL and let the archive skip what's already done.
+        targets = list(self.playlist_data.approved) if self.watch else [self.url]
+        if not targets: return
         info_dict = {}
         with YoutubeDL(download_opts) as ydl:
-            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-            if console: self.pbar.write(f"Downloading {self.name} with {info['playlist_count']} videos...")
-            pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
+            if self.watch:
+                count = len(targets)
+            else:
+                info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+                count = info['playlist_count']
+            if console: self.pbar.write(f"Downloading {self.name} with {count} videos...")
+            pbar_playlist = trange(count, leave=False, desc=self.name, ascii=True, miniters=1)
             pbar_video = trange(100, leave=False, desc='Starting', ascii=True)
-            pbar_playlist.update(self.stats.get_skipped())
-            pbar_playlist.update(self.stats.get_ignored())
+            if not self.watch:
+                pbar_playlist.update(self.stats.get_skipped())
+                pbar_playlist.update(self.stats.get_ignored())
             pbar_playlist.refresh()
             def tqdm_hook(d):
                 nonlocal info_dict
@@ -354,11 +438,12 @@ class ItemDownloader:
             ydl.add_progress_hook(tqdm_hook)
             ydl.add_postprocessor_hook(tqdm_hook_post)
             ydl.add_post_hook(post_hook)
-            ydl.download([self.url])
+            ydl.download(targets)
         pbar_video.close()
         pbar_playlist.close()
+        if self.watch: self.playlist_data.prune_downloaded_approved()  # drop what just downloaded
 
-    def _check_stats(self, url, title, channel, item, console=True, update=False, nas=False):
+    def _check_stats(self, url, title, channel, item, console=True, update=False, nas=False, duration=0):
         safe_chars = {'/': '', ':': '', '*': '', '"': '_', '<': '', '>': '', '|': '', '?': ''}
         existing_file = next((f for f in self.existing_files if safe_filename(title.translate(str.maketrans(safe_chars))) in f), None)
         if not existing_file:
@@ -370,9 +455,17 @@ class ItemDownloader:
         record['title'] = title
         record.pop('channel', None)
         record['channel'] = channel
+        record['duration'] = duration
         if 'ignore' in self.playlist_data.playlist_data and url in self.playlist_data.playlist_data['ignore']:
             return
-        if not existing_file and not in_playlist: self.stats.add_submitted(record)
+        if not existing_file and not in_playlist:
+            if url in self.playlist_data.approved:
+                pass  # already triaged for download; will be fetched on the next download run
+            elif self.watch:
+                self.playlist_data.add_pending(url, record)  # collect for triage instead of downloading
+                self.stats.add_pending(record)
+            else:
+                self.stats.add_submitted(record)
         if existing_file and not in_playlist:
             if console: self.pbar.write(f"    \"{title}\" already exists but not in playlist")
             self.stats.add_data_missing(record)
@@ -397,37 +490,149 @@ class ItemDownloader:
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
 
+    def _extract_entries(self, ydl, wait):
+        """Extract playlist entries, retrying when YouTube returns a truncated page.
+
+        YouTube sometimes serves the first page without a continuation token, so
+        far fewer entries come back than playlist_count. Retrying usually recovers
+        the full list. Keeps the best (largest) result across attempts."""
+        info, entries, playlist_count = None, [], None
+        for attempt in range(STATS_FETCH_RETRIES):
+            info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
+            if info is None: return None, [], None
+            attempt_entries = list(info['entries'] or [])
+            playlist_count = info.get('playlist_count')
+            if len(attempt_entries) > len(entries): entries = attempt_entries
+            if playlist_count is None or len(entries) >= playlist_count: break
+            if attempt + 1 < STATS_FETCH_RETRIES and wait:
+                time.sleep(STATS_FETCH_RETRY_WAIT)
+        return info, entries, playlist_count
+
     def progress(self, download=False, stat_checker=False, update=False, wait=True, console=True, nas=False, file_output=True):
-        if stat_checker: 
+        if stat_checker:
             stat_opts = self.opts.copy()
             stat_opts.update(STATS_OPTIONS)
             self._check_special_files()
             with YoutubeDL(stat_opts) as ydl:
-                info = ydl.sanitize_info(ydl.extract_info(self.url, download=False))
-                if info is None: 
+                info, entries, playlist_count = self._extract_entries(ydl, wait)
+                if info is None:
                     if console: self.pbar.write(f"Error: {self.name} not found")
                     return
-                pbar_playlist = trange(info['playlist_count'], leave=False, desc=self.name, ascii=True, miniters=1)
-                if console: self.pbar.write(f"Checking stats of {self.name} with {info['playlist_count']} videos")
-                for entry in info['entries']:
-                    if 'view_count' in entry and entry['view_count'] is not None:
-                        self._check_stats(entry['url'], entry['title'], entry['channel'], self.item, console=console, update=update, nas=nas)
+                pbar_playlist = trange(playlist_count or len(entries), leave=False, desc=self.name, ascii=True, miniters=1)
+                if console: self.pbar.write(f"Checking stats of {self.name} with {playlist_count} videos")
+                for entry in entries:
+                    if entry and entry.get('url') and entry.get('title'):
+                        self._check_stats(entry['url'], entry['title'], entry.get('channel'), self.item, console=console, update=update, nas=nas, duration=entry.get('duration') or 0)
                     else:
                         self.stats.add_skipped(entry)
                     pbar_playlist.update(1)
                     pbar_playlist.refresh()
-                urls = [entry['url'].replace("https://www.", "https://") for entry in info['entries'] if 'view_count' in entry and entry['view_count'] is not None]
-                for key in self.playlist_data.info.keys():
-                    if key not in urls: self.stats.add_deleted(os.path.splitext(self.playlist_data.info[key]['file'])[0])
+                # Deletion detection only when the listing is complete. A truncated listing
+                # (YouTube stops paginating) would flag every un-listed video as deleted, so
+                # we skip it then rather than false-flag - or hang trying to verify hundreds.
+                urls = set(entry['url'].replace("https://www.", "https://") for entry in entries if entry and entry.get('url'))
+                complete = playlist_count is not None and len(entries) >= playlist_count
+                if complete:
+                    for key in self.playlist_data.info.keys():
+                        if key not in urls:
+                            self.stats.add_deleted(os.path.splitext(self.playlist_data.info[key]['file'])[0])
+                # else: listing truncated by YouTube - skip deletion detection silently
+                # (reporting it would false-flag every un-listed video as deleted).
                 pbar_playlist.close()
-            if not self.stats.has_submitted(): return
+            # Watch playlists download only what's been approved in triage; track playlists
+            # download whatever's newly submitted.
+            if self.watch:
+                if not self.playlist_data.approved: return
+            elif not self.stats.has_submitted():
+                return
         if download: self._download_video(wait=wait, file_output=file_output, console=console)
+
+REVIEW_FILE = 'review.yml'
+
+def _fmt_duration(seconds):
+    seconds = int(seconds or 0)
+    h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+def _gather_pending(data_file):
+    """Load every watched playlist's pending videos. Returns (playlists, items) where
+    playlists maps name->PlaylistData and items is [(name, url, record)] sorted largest-first."""
+    with open(data_file) as f:
+        data = yaml.safe_load(f)
+    playlists, items = {}, []
+    for item in data:
+        if not item.get('watch'): continue
+        pd = PlaylistData(item['name'])
+        playlists[item['name']] = pd
+        for url, record in pd.pending.items():
+            items.append((item['name'], url, record))
+    items.sort(key=lambda t: estimate_gb([t[2]]), reverse=True)
+    return playlists, items
+
+def triage(data_file, file_output=True):
+    """Interactively triage pending videos (largest first): download / ignore / skip / quit."""
+    playlists, items = _gather_pending(data_file)
+    if not items:
+        print("Nothing pending triage.")
+        return
+    print(f"{len(items)} videos pending triage, largest first.  [d]ownload  [i]gnore  [s]kip  [q]uit\n")
+    changed = set()
+    for i, (name, url, record) in enumerate(items):
+        print(f"[{i+1}/{len(items)}] {name}")
+        print(f"    {record.get('title', '?')}")
+        print(f"    {_fmt_duration(record.get('duration'))}   ~{estimate_gb([record]):.1f} GB   {url}")
+        choice = ''
+        while choice not in ('d', 'i', 's', 'q', ''):
+            choice = input("    [d/i/s/q] > ").strip().lower()
+        if choice == 'q': break
+        if choice == 'd': playlists[name].approve(url); changed.add(name)
+        elif choice == 'i': playlists[name].ignore_video(url); changed.add(name)
+        # 's' or empty -> skip: stays pending, offered again next time
+    if file_output:
+        for name in changed: playlists[name].save()
+    print(f"\nUpdated {len(changed)} playlist(s).")
+
+def write_review(data_file):
+    """Write pending videos to review.yml for batch editing (applied on the next run)."""
+    playlists, items = _gather_pending(data_file)
+    if not items:
+        print("Nothing pending triage.")
+        return
+    rows = [{'action': 'pending', 'playlist': name,
+             'title': record.get('title', ''), 'duration': _fmt_duration(record.get('duration')),
+             'est_gb': round(estimate_gb([record]), 2), 'url': url}
+            for name, url, record in items]
+    header = ("# Triage queue, largest first. Set 'action' to one of:\n"
+              "#   download | ignore | skip   (leave as 'pending' to decide later)\n"
+              "# Saved decisions are applied automatically the next time you run the script.\n")
+    with open(REVIEW_FILE, 'w') as f:
+        f.write(header)
+        yaml.dump(rows, f, sort_keys=False, allow_unicode=True)
+    print(f"Wrote {REVIEW_FILE} with {len(rows)} videos. Edit the 'action' fields; applied on your next run.")
+
+def apply_review(data_file, console=True):
+    """Consume review.yml: apply download/ignore decisions, then delete the file."""
+    if not os.path.exists(REVIEW_FILE): return
+    with open(REVIEW_FILE) as f:
+        rows = yaml.safe_load(f) or []
+    playlists, applied = {}, 0
+    for row in rows:
+        action = str(row.get('action', 'pending')).strip().lower()
+        name, url = row.get('playlist'), row.get('url')
+        if action not in ('download', 'ignore') or not name or not url: continue
+        pd = playlists.get(name) or playlists.setdefault(name, PlaylistData(name))
+        (pd.approve if action == 'download' else pd.ignore_video)(url)
+        applied += 1
+    for pd in playlists.values(): pd.save()
+    os.remove(REVIEW_FILE)
+    if console and applied: print(f"Applied {applied} triage decision(s) from {REVIEW_FILE}")
 
 def downloader(data_file, path, download, check_stats, update, wait, stats_file, console, file_output, list_info, nas):
     """Download the videos from the data file"""
-    if not download and not check_stats: 
+    if not download and not check_stats:
         if console: print("No action specified")
         return
+    if file_output: apply_review(data_file, console=console)  # consume any edited review.yml first
     ssl._create_default_https_context = ssl._create_unverified_context
     with open(data_file, 'r') as file:
         data = yaml.safe_load(file)
@@ -469,6 +674,15 @@ if __name__ == '__main__':
     To check the stats of the files without changing any files, you can use:
         python3 ytdlp.py -sf
 
+    Watching playlists:
+        Add 'watch: true' to a playlist in the data file. New videos in watched playlists
+        are collected as "pending" for review instead of downloaded automatically (a normal
+        run still downloads your other playlists - watching never blocks).
+        Triage the pending videos, largest first, either way:
+            python3 ytdlp.py --triage    # interactive: [d]ownload / [i]gnore / [s]kip
+            python3 ytdlp.py --review    # write review.yml to batch-edit, applied next run
+        Approved videos download on your next 'python3 ytdlp.py -sd'.
+
     A PO-token is required to download the videos. 
         # Replace `~` with `$USERPROFILE` if using Windows
         cd ~
@@ -488,6 +702,8 @@ if __name__ == '__main__':
     parser.add_argument("-u", "--update", help="Update the data files (automatically True if downloading, still required if you want to update missing elements)", default=False, action='store_true')
     parser.add_argument("-d", "--download", help="Download the files", default=False, action='store_true')
     parser.add_argument("-w", "--no-wait", help="Don't wait between requests", default=False, action='store_true')
+    parser.add_argument("-t", "--triage", help="Interactively triage pending videos from watched playlists", default=False, action='store_true')
+    parser.add_argument("-r", "--review", help="Write pending videos to review.yml for batch triage", default=False, action='store_true')
 
     subparsers = parser.add_argument_group(title='File Output',
         description='Set the files to output to')
@@ -506,4 +722,9 @@ if __name__ == '__main__':
     if args.download: args.update = True
     console = not args.no_console
     file_output = not args.no_file
-    downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, wait=not args.no_wait, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
+    if args.triage:
+        triage(args.data, file_output=file_output)
+    elif args.review:
+        write_review(args.data)
+    else:
+        downloader(args.data, path, download=args.download, check_stats=args.stats, update=args.update, wait=not args.no_wait, stats_file=args.output, console=console, file_output=file_output, list_info=args.list_info, nas=args.nas)
