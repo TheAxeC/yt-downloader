@@ -3,6 +3,10 @@ package-lock.json
 package.json
 *.yml
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+
 data/
 
 # Auth cookies / PO-token credentials — never commit

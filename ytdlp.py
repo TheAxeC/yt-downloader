@@ -3,6 +3,9 @@ import yaml, ssl, os, argparse, re, shutil, time # type: ignore
 import ntpath # type: ignore
 from yt_dlp import YoutubeDL, postprocessor # type: ignore
 from yt_dlp.utils import sanitize_filename # type: ignore
+from yt_dlp.version import __version__ as YTDLP_VERSION # type: ignore
+
+YTDLP_STALE_DAYS = 30  # YouTube anti-bot changes weekly; an old yt-dlp is the #1 cause of failures
 
 DATA_FILE = 'data.yml'
 STATS_FILE = 'stats.yml'
@@ -23,6 +26,19 @@ OUTTMPL_DEFAULT = '%(title)s.%(ext)s'
 OUTTMPL_CHANNEL = '[%(uploader)s] - '
 OUTTMPL_COUNT = '%(playlist_index)s - '
 
+def _player_clients():
+    """Which Innertube clients yt-dlp should try for YouTube.
+
+    We deliberately do NOT hardcode a client list anymore. The old ['ios', 'web'] pair is
+    a 2024-era pattern that aged badly: as of mid-2026 the `ios` client silently ignores
+    account cookies and needs GVS/Player PO tokens, and `web` needs PO tokens too. yt-dlp's
+    own default rotation tracks YouTube's frequent changes and auto-drops clients that can't
+    use the cookies you supply, so deferring to it is more robust than pinning a stale list.
+    Override only if you know you need to, e.g. YT_PLAYER_CLIENT="tv,web_safari".
+    (See https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide)"""
+    override = os.environ.get('YT_PLAYER_CLIENT', '').strip()
+    return [c.strip() for c in override.split(',') if c.strip()] if override else None
+
 BASE_OPTIONS = {
     'allow_playlist_files': False,
     'ignoreerrors': 'only_download',
@@ -31,9 +47,13 @@ BASE_OPTIONS = {
     'quiet': True,
     'noprogress': True,
     'abort_on_unavailable_fragments': True,
-    'cookiefile': 'cookies.txt',  # Use cookies from browser
-    'extractor_args': {'youtube': {'player_client': ['ios', 'web']}},  # Use multiple clients
 }
+# Cookieless by design: we authenticate via the PO-token provider plugin (see README), not
+# account cookies. Pointing an automated, high-volume downloader at a logged-in account is
+# exactly the pattern YouTube's bot detection flags, and risks the account being banned.
+_PLAYER_CLIENTS = _player_clients()
+if _PLAYER_CLIENTS:
+    BASE_OPTIONS['extractor_args'] = {'youtube': {'player_client': _PLAYER_CLIENTS}}
 
 STATS_OPTIONS = {
     'extract_flat': 'in_playlist',
@@ -113,17 +133,24 @@ class TQDMLogger:
         if 'Video unavailable' in msg: return
         if 'members' in msg: return
         if 'Sign in to confirm your age' in msg: return
-        # if "Sign in to confirm you’re not a bot" not in msg:
-        #     return
+        # The bot wall is the critical failure signal, not an ordinary per-video skip:
+        # surface it loudly so it doesn't scroll past. It usually means the IP is flagged --
+        # update yt-dlp (nightly), slow down, check the PO-token provider, or change network.
+        if 'not a bot' in msg:
+            self.pbar.write(f"    [BOT CHECK] {msg}")
+            self.pbar.write("    -> flagged. Try: yt-dlp --update-to nightly, slow down, or check the PO-token provider.")
+            return
         self.pbar.write(f"    {msg}")
-        # raise DownloadErrorException()
 
 def safe_filename(s: str, max_length: int = 255) -> str:
     """Sanitize a string making it safe to use as a filename."""
     characters = [r'"', r"\*", r"\.", r"\/", r"\:", r'"', r"\<", r"\>", r"\?", r"\\", r"\|", r"\\\\"]
     regex = re.compile("|".join([chr(i) for i in range(31)] + characters), re.UNICODE)
     filename = regex.sub("", s)
-    return filename[:max_length].rsplit(" ", 0)[0]
+    if len(filename) <= max_length:
+        return filename
+    # Trim to the last whole word so we don't cut a word in half at the limit.
+    return filename[:max_length].rsplit(" ", 1)[0]
 
 class Stats:
     def __init__(self):
@@ -480,12 +507,12 @@ class ItemDownloader:
             if os.name == 'posix' and not nas: 
                 self.stats.add_skipped(record)
                 return
-            item = self.playlist_data.info[url]['file']
-            if os.name == 'posix': item = unicodedata.normalize('NFC', item)
+            stored_file = self.playlist_data.info[url]['file']
+            if os.name == 'posix': stored_file = unicodedata.normalize('NFC', stored_file)
             filesnames = [elem for elem in self.existing_files]
             if os.name == 'posix': filesnames = [unicodedata.normalize('NFC', name) for name in filesnames]
-            filename = os.path.join(self.outputdir, item)
-            if not os.path.exists(filename) and item not in filesnames:
+            filename = os.path.join(self.outputdir, stored_file)
+            if not os.path.exists(filename) and stored_file not in filesnames:
                 self.stats.add_missing(record)
             else: self.stats.add_skipped(record)
         if existing_file and in_playlist: self.stats.add_skipped(record)
@@ -627,11 +654,26 @@ def apply_review(data_file, console=True):
     os.remove(REVIEW_FILE)
     if console and applied: print(f"Applied {applied} triage decision(s) from {REVIEW_FILE}")
 
+def _warn_if_stale_ytdlp(console):
+    """Warn when yt-dlp looks old. Anti-bot evasion is a moving target measured in weeks, so
+    a stale yt-dlp is the single most common reason downloads suddenly start failing."""
+    if not console: return
+    try:
+        y, m, d = (int(x) for x in YTDLP_VERSION.split('.')[:3])
+        age_days = (time.time() - time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))) / 86400
+    except Exception:
+        return  # unrecognized version string (e.g. a dev build) - don't second-guess it
+    if age_days > YTDLP_STALE_DAYS:
+        print(f"WARNING: yt-dlp {YTDLP_VERSION} is ~{age_days:.0f} days old. YouTube's bot detection "
+              "changes constantly; update before you get walled:")
+        print('         python3 -m pip install -U --pre "yt-dlp[default]"   (nightly channel)')
+
 def downloader(data_file, path, download, check_stats, update, wait, stats_file, console, file_output, list_info, nas):
     """Download the videos from the data file"""
     if not download and not check_stats:
         if console: print("No action specified")
         return
+    _warn_if_stale_ytdlp(console)
     if file_output: apply_review(data_file, console=console)  # consume any edited review.yml first
     ssl._create_default_https_context = ssl._create_unverified_context
     with open(data_file, 'r') as file:
@@ -683,15 +725,8 @@ if __name__ == '__main__':
             python3 ytdlp.py --review    # write review.yml to batch-edit, applied next run
         Approved videos download on your next 'python3 ytdlp.py -sd'.
 
-    A PO-token is required to download the videos. 
-        # Replace `~` with `$USERPROFILE` if using Windows
-        cd ~
-        # Replace 0.7.3 with the latest version or the one that matches the plugin
-        git clone --single-branch --branch 0.7.3 https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git
-        cd bgutil-ytdlp-pot-provider/server/
-        yarn install --frozen-lockfile
-        npx tsc
-        python3 -m pip install -U bgutil-ytdlp-pot-provider"""
+    A PO-token provider is required to download most videos. See README.md for the
+    one-time bgutil-ytdlp-pot-provider setup and cookie/account guidance."""
     parser=argparse.ArgumentParser(prog='Builder',
         description=usage,
         allow_abbrev=False,
@@ -709,7 +744,7 @@ if __name__ == '__main__':
         description='Set the files to output to')
     subparsers.add_argument("-p", "--path", help="The path to download to (default: '"+DEFAULT_PATH+"')", default=DEFAULT_PATH)
     subparsers.add_argument("-i", "--data", "--input", help="The data file to use (default: '"+DATA_FILE+"')", default=DATA_FILE)
-    subparsers.add_argument("-o", "--output", help="The stats file to use (default: '"+STATS_FILE+"')", default=STATS_FILE)
+    subparsers.add_argument("-o", "--output", help="The stats file to use, only used with -s/--stats (default: '"+STATS_FILE+"')", default=STATS_FILE)
 
     subparsers = parser.add_argument_group(title='Control output',
         description='Control the output of the script')
@@ -718,6 +753,10 @@ if __name__ == '__main__':
     subparsers.add_argument("-l", "--list-info", help="Output the full info of the stats", default=False, action='store_true')
     
     args=parser.parse_args()
+    # Guardrail: the canonical invocation is -sd; doing nothing is almost always a mistake
+    # (a forgotten flag), so fail loudly with usage instead of silently exiting.
+    if not (args.stats or args.download or args.triage or args.review):
+        parser.error("nothing to do: pass -s/--stats and/or -d/--download (e.g. -sd), or --triage / --review")
     path = NAS_PATH if args.nas else args.path
     if args.download: args.update = True
     console = not args.no_console
