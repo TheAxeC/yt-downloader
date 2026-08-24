@@ -9,7 +9,7 @@ __pycache__/
 
 data/
 
-# Auth cookies / PO-token credentials — never commit
+# Auth cookies / PO-token credentials: never commit
 cookies.txt
 
 .DS_Store
