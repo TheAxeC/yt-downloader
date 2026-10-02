@@ -1,0 +1,5 @@
+title: "yt-downloader"
+status: running
+eli5: "A script that downloads and tracks YouTube playlists and channels with yt-dlp from a data file. It keeps a per-playlist archive so nothing is fetched twice, and watched playlists queue new videos for review instead of downloading them."
+next: ""
+links: []

@@ -13,3 +13,4 @@ data/
 cookies.txt
 
 .DS_Store
+!.oculus/project.yml
